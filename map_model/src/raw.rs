@@ -332,6 +332,41 @@ impl RawMap {
         let mut connected_to_i1 = self.roads_per_intersection(i1);
         connected_to_i1.retain(|x| *x != short);
 
+        // Retain some geometry...
+        {
+            let mut trim_roads_for_merging = BTreeMap::new();
+            for i in vec![i1, i2] {
+                for r in self.roads_per_intersection(i) {
+                    // If we keep this in there, it might accidentally overwrite the
+                    // trim_roads_for_merging key for a surviving road!
+                    if r == short {
+                        continue;
+                    }
+
+                    if let Some(pl) = self.trimmed_road_geometry(r) {
+                        if r.i1 == i {
+                            if trim_roads_for_merging.contains_key(&(r.osm_way_id, true)) {
+                                error!("ahhhh dupe for {}", r);
+                            }
+                            trim_roads_for_merging.insert((r.osm_way_id, true), pl.first_pt());
+                        } else {
+                            if trim_roads_for_merging.contains_key(&(r.osm_way_id, false)) {
+                                error!("ahhhh dupe for {}", r);
+                            }
+                            trim_roads_for_merging.insert((r.osm_way_id, false), pl.last_pt());
+                        }
+                    } else {
+                        error!("no trimmed_road_geometry for {}", r);
+                    }
+                }
+            }
+            self.intersections
+                .get_mut(&i1)
+                .unwrap()
+                .trim_roads_for_merging
+                .extend(trim_roads_for_merging);
+        }
+
         self.roads.remove(&short).unwrap();
 
         // Arbitrarily keep i1 and destroy i2. If the intersection types differ, upgrade the
@@ -362,8 +397,9 @@ impl RawMap {
             ArbitrarilyOne,
             OnlyNormalRoads,
         }
+        // TODO Totally just remove all of this code
         let modify_geom = ModifyGeom::AddOnePoint;
-        let modify_which = ModifyWhichRoads::All;
+        let modify_which = ModifyWhichRoads::None;
 
         // Fix up all roads connected to i2. Delete them and create a new copy; the ID changes,
         // since one intersection changes.
@@ -555,6 +591,9 @@ pub struct RawIntersection {
     pub point: Pt2D,
     pub intersection_type: IntersectionType,
     pub elevation: Distance,
+
+    // true if src_i matches this intersection (or the deleted/consolidated one, whatever)
+    pub trim_roads_for_merging: BTreeMap<(osm::WayID, bool), Pt2D>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

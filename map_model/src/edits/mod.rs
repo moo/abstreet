@@ -550,6 +550,7 @@ fn recalculate_intersection_polygon(
     let mut intersection_roads = BTreeSet::new();
     let mut roads = BTreeMap::new();
     let mut modify_roads = Vec::new();
+    let mut any_merged = false;
     for r in &intersection.roads {
         let r = map.get_r(*r);
         modify_roads.push((r.orig_id, r.id));
@@ -561,23 +562,29 @@ fn recalculate_intersection_polygon(
         };
 
         let mut trimmed_center_pts = r.center_pts.clone();
-        // intersection_polygon assumes the end of the center points extends all of the way into
-        // the intersection itself. So untrim in the direction we're about to modify. If for some
-        // reason this fails, the size of the intersection might unrealisticalluy grow.
-        if r.src_i == i {
-            if let Some(pl) = r
+
+        let either_merged = map.get_i(r.src_i).merged || map.get_i(r.dst_i).merged;
+        any_merged |= either_merged;
+        if !either_merged {
+            // intersection_polygon assumes the end of the center points extends all of the way
+            // into the intersection itself. So untrim in the direction we're about to modify. If
+            // for some reason this fails, the size of the intersection might unrealisticalluy
+            // grow.
+            if r.src_i == i {
+                if let Some(pl) = r
+                    .untrimmed_center_pts
+                    .safe_get_slice_ending_at(trimmed_center_pts.first_pt())
+                    .and_then(|pl| pl.extend(trimmed_center_pts.clone()).ok())
+                {
+                    trimmed_center_pts = pl;
+                }
+            } else if let Some(pl) = r
                 .untrimmed_center_pts
-                .safe_get_slice_ending_at(trimmed_center_pts.first_pt())
-                .and_then(|pl| pl.extend(trimmed_center_pts.clone()).ok())
+                .safe_get_slice_starting_at(trimmed_center_pts.last_pt())
+                .and_then(|pl| trimmed_center_pts.clone().extend(pl).ok())
             {
                 trimmed_center_pts = pl;
             }
-        } else if let Some(pl) = r
-            .untrimmed_center_pts
-            .safe_get_slice_starting_at(trimmed_center_pts.last_pt())
-            .and_then(|pl| trimmed_center_pts.clone().extend(pl).ok())
-        {
-            trimmed_center_pts = pl;
         }
 
         roads.insert(
@@ -599,7 +606,7 @@ fn recalculate_intersection_polygon(
         intersection.orig_id,
         intersection_roads,
         &mut roads,
-        intersection.merged,
+        any_merged,
     )
     .unwrap()
     .0;

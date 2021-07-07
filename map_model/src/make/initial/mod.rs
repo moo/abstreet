@@ -61,12 +61,7 @@ pub struct Intersection {
 }
 
 impl InitialMap {
-    pub fn new(
-        raw: &RawMap,
-        bounds: &Bounds,
-        merged_intersections: &BTreeSet<osm::NodeID>,
-        timer: &mut Timer,
-    ) -> InitialMap {
+    pub fn new(raw: &RawMap, bounds: &Bounds, timer: &mut Timer) -> InitialMap {
         let mut m = InitialMap {
             roads: BTreeMap::new(),
             intersections: BTreeMap::new(),
@@ -106,11 +101,33 @@ impl InitialMap {
         timer.start_iter("find each intersection polygon", m.intersections.len());
         for i in m.intersections.values_mut() {
             timer.next();
+
+            // First pre-trim roads if it's a consolidated intersection.
+            let trim_roads_for_merging = &raw.intersections[&i.id].trim_roads_for_merging;
+            if !trim_roads_for_merging.is_empty() {
+                for r in raw.roads_per_intersection(i.id) {
+                    if let Some(endpt) = trim_roads_for_merging.get(&(r.osm_way_id, r.i1 == i.id)) {
+                        if let Some(road) = m.roads.get_mut(&r) {
+                            if road.src_i == i.id {
+                                road.trimmed_center_pts = road
+                                    .trimmed_center_pts
+                                    .get_slice_starting_at(*endpt)
+                                    .unwrap();
+                            } else {
+                                assert_eq!(road.dst_i, i.id);
+                                road.trimmed_center_pts =
+                                    road.trimmed_center_pts.get_slice_ending_at(*endpt).unwrap();
+                            }
+                        }
+                    }
+                }
+            }
+
             match intersection_polygon(
                 i.id,
                 i.roads.clone(),
                 &mut m.roads,
-                merged_intersections.contains(&i.id),
+                !trim_roads_for_merging.is_empty(),
             ) {
                 Ok((poly, _)) => {
                     i.polygon = poly;
@@ -158,7 +175,7 @@ impl InitialMap {
                 i.id,
                 i.roads.clone(),
                 &mut m.roads,
-                merged_intersections.contains(&i.id),
+                !raw.intersections[&i.id].trim_roads_for_merging.is_empty(),
             )
             .unwrap()
             .0;

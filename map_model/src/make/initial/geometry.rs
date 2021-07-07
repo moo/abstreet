@@ -78,19 +78,32 @@ pub fn intersection_polygon(
         for (r, trimmed_center_pts) in rollback {
             roads.get_mut(&r).unwrap().trimmed_center_pts = trimmed_center_pts;
         }
-        let (result, debug) = generalized_trim_back(roads, intersection_id, &lines)?;
         if merged {
-            if let Some(fixed) = convex_hull_merged_intersection(
-                result.clone(),
-                intersection_id,
-                intersection_roads,
-                roads,
-            ) {
-                return Ok((fixed, debug));
-            }
+            pretrimmed_geometry(roads, intersection_id, &lines)
+        } else {
+            generalized_trim_back(roads, intersection_id, &lines)
         }
-        Ok((result, debug))
     }
+}
+
+fn pretrimmed_geometry(
+    roads: &mut BTreeMap<OriginalRoad, Road>,
+    i: osm::NodeID,
+    lines: &[(OriginalRoad, Pt2D, PolyLine, PolyLine)],
+) -> Result<(Polygon, Vec<(String, Polygon)>)> {
+    let mut endpoints: Vec<Pt2D> = Vec::new();
+    for (r, _, _, _) in lines {
+        let r = &roads[r];
+        // Shift those final centers out again to find the main endpoints for the polygon.
+        if r.dst_i == i {
+            endpoints.push(r.trimmed_center_pts.shift_right(r.half_width)?.last_pt());
+            endpoints.push(r.trimmed_center_pts.shift_left(r.half_width)?.last_pt());
+        } else {
+            endpoints.push(r.trimmed_center_pts.shift_left(r.half_width)?.first_pt());
+            endpoints.push(r.trimmed_center_pts.shift_right(r.half_width)?.first_pt());
+        }
+    }
+    Ok((finalize_polygon(i, endpoints), Vec::new()))
 }
 
 fn generalized_trim_back(
@@ -273,6 +286,10 @@ fn generalized_trim_back(
         }
     }
 
+    Ok((finalize_polygon(i, endpoints), debug))
+}
+
+fn finalize_polygon(i: osm::NodeID, endpoints: Vec<Pt2D>) -> Polygon {
     // There are bad polygons caused by weird short roads. As a temporary workaround, detect cases
     // where polygons dramatically double back on themselves and force the polygon to proceed
     // around its center.
@@ -286,13 +303,13 @@ fn generalized_trim_back(
     deduped = Pt2D::approx_dedupe(deduped, Distance::meters(0.1));
     deduped = close_off_polygon(deduped);
     if main_result.len() == deduped.len() {
-        Ok((Ring::must_new(main_result).into_polygon(), debug))
+        Ring::must_new(main_result).into_polygon()
     } else {
         warn!(
             "{}'s polygon has weird repeats, forcibly removing points",
             i
         );
-        Ok((Ring::must_new(deduped).into_polygon(), debug))
+        Ring::must_new(deduped).into_polygon()
     }
 
     // TODO Or always sort points? Helps some cases, hurts other for downtown Seattle.
@@ -597,37 +614,4 @@ fn on_off_ramp(
 
     //let dummy = Circle::new(orig_lines[0].3.last_pt(), Distance::meters(3.0)).to_polygon();
     //Some((close_off_polygon(dummy.into_points()), debug))
-}
-
-// The polygon produced by generalized_trim_back for merged intersections is usually jagged. A
-// simple fix is to take the convex hull of the result. But this is only valid when the trimmed
-// road center-lines still hit the polygon only at the border.
-fn convex_hull_merged_intersection(
-    input: Polygon,
-    intersection_id: osm::NodeID,
-    intersection_roads: BTreeSet<OriginalRoad>,
-    roads: &BTreeMap<OriginalRoad, Road>,
-) -> Option<Polygon> {
-    let candidate = Polygon::convex_hull(vec![input]);
-    let candidate_ring = candidate.clone().into_ring();
-
-    for id in intersection_roads {
-        let r = &roads[&id];
-        let trimmed_endpt = if r.src_i == intersection_id {
-            r.trimmed_center_pts.first_pt()
-        } else {
-            r.trimmed_center_pts.last_pt()
-        };
-        // If we wanted to be more paranoid here, we could also check the left and right shifted
-        // polylines.
-
-        // Assume the convex hull could only ever "grow" the input, never "shrink" it. So it should
-        // suffice to see if the trimmed endpoint is in the interior of the polygon.
-        if candidate.contains_pt(trimmed_endpt) && !candidate_ring.contains_pt(trimmed_endpt) {
-            // We could also trim this road based on the new hit. Except that would then require
-            // modifying the polygon a bit!
-            return None;
-        }
-    }
-    Some(candidate)
 }
