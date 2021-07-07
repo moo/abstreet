@@ -23,6 +23,8 @@ const TIME_TO_CHANGE_LANES: Duration = Duration::const_seconds(1.0);
 pub const BLIND_RETRY_TO_CREEP_FORWARDS: Duration = Duration::const_seconds(0.1);
 pub const BLIND_RETRY_TO_REACH_END_DIST: Duration = Duration::const_seconds(5.0);
 
+const DEBUG_LC: bool = true;
+
 /// Simulates vehicles!
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct DrivingSimState {
@@ -404,13 +406,13 @@ impl DrivingSimState {
                         ));
                     }
 
-                    if let Some(target_lane) = self.pick_overtaking_lane(car, ctx.map) {
+                    if let Some(pair) = self.pick_overtaking_lane(car, ctx.map) {
                         // We need the current position of the car to see if lane-changing is
                         // actually feasible right now, so record our intention and trigger
                         // update_car_with_distances.
                         car.state = CarState::Queued {
                             blocked_since: now,
-                            want_to_change_lanes: Some(target_lane),
+                            want_to_change_lanes: Some(pair),
                         };
                         return true;
                     }
@@ -547,17 +549,13 @@ impl DrivingSimState {
             }
             CarState::ChangingLanes {
                 from,
+                to,
                 new_time,
                 new_dist,
+                must_return,
                 ..
             } => {
-                // The car is already in the target queue. Just set them in the crossing state; we
-                // already calculated the intervals for it.
-                car.state = CarState::Crossing(new_time, new_dist);
-                ctx.scheduler
-                    .push(car.state.get_end_time(), Command::UpdateCar(car.vehicle.id));
-
-                // And remove the blockage from the old queue. Similar to the note in this function
+                // Remove the blockage from the old queue. Similar to the note in this function
                 // for Unparking, we calculate distances in that OTHER queue.
                 let dists = self.queues[&Traversable::Lane(from)].get_car_positions(
                     now,
@@ -571,6 +569,46 @@ impl DrivingSimState {
                     .get_mut(&Traversable::Lane(from))
                     .unwrap()
                     .clear_dynamic_blockage(car.vehicle.id, idx);
+
+                if must_return {
+                    assert!(idx != 0);
+                    let return_idx = idx - 1;
+
+                    // ASAP exit the old queue (leaving a dynamic blockage in place)
+                    // TODO uhh whats the index?
+                    // TODO also this ghost just winds up at the very front, whoops. maybe just do
+                    // a static blockage? except it'd be a little weird for following
+                    self.queues
+                        .get_mut(&car.router.head())
+                        .unwrap()
+                        .replace_car_with_dynamic_blockage(car, 0);
+
+                    // Change the path again, back to the original thing
+                    car.router.confirm_lanechange(from, false, ctx.map);
+
+                    // Insert into the new (aka original) queue
+                    self.queues
+                        .get_mut(&car.router.head())
+                        .unwrap()
+                        .insert_car_at_idx(return_idx, car);
+
+                    car.state = CarState::ChangingLanes {
+                        from: to,
+                        to: from,
+                        // TODO will these two still be valid?!?!
+                        new_time,
+                        new_dist,
+                        lc_time: TimeInterval::new(now, now + TIME_TO_CHANGE_LANES),
+                        must_return: false,
+                    };
+                } else {
+                    // The car is already in the target queue. Just set them in the crossing state; we
+                    // already calculated the intervals for it.
+                    car.state = CarState::Crossing(new_time, new_dist);
+                }
+                ctx.scheduler
+                    .push(car.state.get_end_time(), Command::UpdateCar(car.vehicle.id));
+
             }
             CarState::Queued { .. } => unreachable!(),
             CarState::Parking(_, _, _) => unreachable!(),
@@ -604,8 +642,8 @@ impl DrivingSimState {
             } => {
                 // Two totally different reasons we'll wind up here: we want to lane-change, and
                 // we're on our last step.
-                if let Some(target_lane) = want_to_change_lanes {
-                    self.try_start_lc(car, our_dist, idx, target_lane, now, ctx);
+                if let Some((target_lane, must_return)) = want_to_change_lanes {
+                    self.try_start_lc(car, our_dist, idx, target_lane, must_return, now, ctx);
                     return true;
                 }
 
@@ -886,7 +924,7 @@ impl DrivingSimState {
                     );
                 }
                 CarState::ChangingLanes {
-                    from, to, lc_time, ..
+                    from, to, lc_time, must_return, ..
                 } => {
                     // This is a fun case -- something stopped blocking somebody that was in the
                     // process of lane-changing! Similar to the Crossing case above, we just have
@@ -910,6 +948,7 @@ impl DrivingSimState {
                         new_time,
                         new_dist,
                         lc_time,
+                        must_return,
                     };
                 }
                 // They weren't blocked
@@ -1066,12 +1105,13 @@ impl DrivingSimState {
         }
     }
 
-    /// If the car wants to over-take somebody, what adjacent lane should they use?
+    /// If the car wants to over-take somebody, what adjacent lane should they use? And are they
+    /// required to return to the original lane or not?
     /// - The lane must be in the same direction as the current; no support for crossing the road's
     ///   yellow line yet.
     /// - Prefer passing on the left (for DrivingSide::Right)
     /// For now, just pick one candidate lane, even if both might be usable.
-    fn pick_overtaking_lane(&self, car: &Car, map: &Map) -> Option<LaneID> {
+    fn pick_overtaking_lane(&self, car: &Car, map: &Map) -> Option<(LaneID, bool)> {
         // Don't overtake in the middle of a turn!
         let current_lane = map.get_l(car.router.head().maybe_lane()?);
         let road = map.get_r(current_lane.parent);
@@ -1107,13 +1147,10 @@ impl DrivingSimState {
             }
             // Is this other lane compatible with the path? We won't make any attempts to return to the
             // original lane after changing.
-            if !car
+            let must_return = !car
                 .router
-                .can_lanechange(current_lane.id, target_lane.id, map)
-            {
-                continue;
-            }
-            return Some(target_lane.id);
+                .can_lanechange(current_lane.id, target_lane.id, map);
+            return Some((target_lane.id, must_return));
         }
 
         None
@@ -1125,6 +1162,7 @@ impl DrivingSimState {
         front_current_queue: Distance,
         idx_in_current_queue: usize,
         target_lane: LaneID,
+        must_return: bool,
         now: Time,
         ctx: &mut Ctx,
     ) {
@@ -1172,12 +1210,13 @@ impl DrivingSimState {
             )
         {
             // TODO Can downgrade this to an alert or debug once active work has settled down
-            if false {
+            if DEBUG_LC {
                 info!(
-                    "{} is starting to change lanes from {} to {}",
+                    "{} is starting to change lanes from {} to {}. Must return? {}",
                     car.vehicle.id,
                     car.router.head(),
-                    target_lane
+                    target_lane,
+                    must_return
                 );
             }
 
@@ -1188,7 +1227,7 @@ impl DrivingSimState {
                 .replace_car_with_dynamic_blockage(car, idx_in_current_queue);
 
             // Change the path
-            car.router.confirm_lanechange(target_lane, ctx.map);
+            car.router.confirm_lanechange(target_lane, must_return, ctx.map);
 
             // Insert into the new queue
             self.queues
@@ -1203,6 +1242,7 @@ impl DrivingSimState {
                 new_time,
                 new_dist,
                 lc_time,
+                must_return,
             };
             ctx.scheduler
                 .push(car.state.get_end_time(), Command::UpdateCar(car.vehicle.id));
@@ -1360,7 +1400,7 @@ impl DrivingSimState {
                     }
                     // Manually enable to debug exiting driveways and lane-changing
                     Queued::StaticBlockage { cause, front, back } => {
-                        if false {
+                        if DEBUG_LC {
                             Some(DrawCarInput {
                                 id: cause,
                                 waiting_for_turn: None,
@@ -1377,7 +1417,7 @@ impl DrivingSimState {
                         }
                     }
                     Queued::DynamicBlockage { cause, vehicle_len } => {
-                        if false {
+                        if DEBUG_LC {
                             Some(DrawCarInput {
                                 id: cause,
                                 waiting_for_turn: None,
