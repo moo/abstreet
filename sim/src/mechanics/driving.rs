@@ -394,10 +394,11 @@ impl DrivingSimState {
                 } else if let Some(slow_leader) = self.wants_to_overtake(car) {
                     // TODO This entire check kicks in a little late; we only enter Queued after
                     // spending the freeflow time possibly moving very slowly.
-                    car.wants_to_overtake.insert(slow_leader);
+                    let first_conflict = car.wants_to_overtake.insert(slow_leader);
 
-                    // Record when a vehicle wants to pass a bike
-                    if slow_leader.vehicle_type == VehicleType::Bike
+                    // Record when a vehicle wants to pass a bike, but only the first time
+                    if first_conflict
+                        && slow_leader.vehicle_type == VehicleType::Bike
                         && car.vehicle.vehicle_type != VehicleType::Bike
                     {
                         self.events.push(Event::ProblemEncountered(
@@ -597,7 +598,10 @@ impl DrivingSimState {
                     // And recalculate the crossing intervals, using the slowpoke's front
                     // (Note this shadows the variables from the match)
                     let (new_time, new_dist) = match car.crossing_state_with_end_dist(
-                        DistanceInterval::new_driving(slowpoke_front + car.vehicle.length + FOLLOWING_DISTANCE, ctx.map.get_l(from).length()),
+                        DistanceInterval::new_driving(
+                            slowpoke_front + car.vehicle.length + FOLLOWING_DISTANCE,
+                            ctx.map.get_l(from).length(),
+                        ),
                         now,
                         ctx.map,
                     ) {
@@ -620,7 +624,6 @@ impl DrivingSimState {
                 }
                 ctx.scheduler
                     .push(car.state.get_end_time(), Command::UpdateCar(car.vehicle.id));
-
             }
             CarState::Queued { .. } => unreachable!(),
             CarState::Parking(_, _, _) => unreachable!(),
@@ -936,7 +939,11 @@ impl DrivingSimState {
                     );
                 }
                 CarState::ChangingLanes {
-                    from, to, lc_time, must_return, ..
+                    from,
+                    to,
+                    lc_time,
+                    must_return,
+                    ..
                 } => {
                     // This is a fun case -- something stopped blocking somebody that was in the
                     // process of lane-changing! Similar to the Crossing case above, we just have
@@ -1239,7 +1246,8 @@ impl DrivingSimState {
                 .replace_car_with_dynamic_blockage(car, idx_in_current_queue);
 
             // Change the path
-            car.router.confirm_lanechange(target_lane, must_return, ctx.map);
+            car.router
+                .confirm_lanechange(target_lane, must_return, ctx.map);
 
             // Insert into the new queue
             self.queues
@@ -1660,9 +1668,6 @@ impl DrivingSimState {
     fn wants_to_overtake(&self, car: &Car) -> Option<CarID> {
         let queue = &self.queues[&car.router.head()];
         let leader = queue.get_leader(car.vehicle.id)?;
-        if car.wants_to_overtake.contains(&leader) {
-            return None;
-        }
         let leader = &self.cars[&leader];
 
         // Are we faster than them?
