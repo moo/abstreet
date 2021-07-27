@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use aabb_quadtree::QuadTree;
 
 use abstutil::Timer;
-use geom::{Bounds, Polygon};
+use geom::{Bounds, Distance, Polygon};
 use map_model::{
     AreaID, BuildingID, BusStopID, IntersectionID, LaneID, Map, ParkingLotID, Road, RoadID,
 };
@@ -212,10 +212,21 @@ impl DrawMap {
     ) -> Drawable {
         timer.start("generate unzoomed roads and intersections");
         let mut unzoomed_pieces: Vec<(isize, Polygon, Color)> = Vec::new();
+        let mut outlines = Vec::new();
+        let outline_thickness = Distance::meters(1.0);
         for r in map.all_roads() {
+            // Draw a thick outline on the left and right
+            let width = r.get_width(map);
+            if let Ok(pl) = r.center_pts.shift_left(width / 2.0) {
+                outlines.push(pl.make_polygons(outline_thickness));
+            }
+            if let Ok(pl) = r.center_pts.shift_right(width / 2.0) {
+                outlines.push(pl.make_polygons(outline_thickness));
+            }
+
             unzoomed_pieces.push((
                 r.zorder,
-                r.get_thick_polygon(map),
+                r.center_pts.make_polygons(width),
                 if r.is_light_rail() {
                     cs.light_rail_track
                 } else if r.is_cycleway() {
@@ -251,6 +262,9 @@ impl DrawMap {
         for (_, poly, color) in unzoomed_pieces {
             unzoomed_batch.push(color, poly);
         }
+        // TODO Different in night mode
+        // TODO Is there still slight z-fighting? Should it be a separate batch?
+        unzoomed_batch.extend(Color::BLACK, outlines);
         let draw_all_unzoomed_roads_and_intersections = unzoomed_batch.upload(ctx);
         timer.stop("generate unzoomed roads and intersections");
         draw_all_unzoomed_roads_and_intersections

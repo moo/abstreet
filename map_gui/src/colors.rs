@@ -480,8 +480,15 @@ impl ColorScheme {
 
         cs.sidewalk = hex("#A9A9A9");
         cs.sidewalk_lines = hex("#989898");
+        //cs.private_road = cs.bike_lane;
+        //cs.private_road = hex("#74B0FC");
+        //cs.private_road = hex("#7c74fc");
+        cs.private_road = hex("#6fb193");
 
         cs.unzoomed_arterial = hex("#F6A483");
+
+        cs.residential_building = hex("#C5D2E5");
+        cs.commercial_building = hex("#99aecc");
 
         cs
     }

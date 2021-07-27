@@ -33,7 +33,7 @@ impl DrawBuilding {
         match &opts.camera_angle {
             CameraAngle::TopDown => {
                 bldg_batch.push(bldg_color, bldg.polygon.clone());
-                if let Ok(p) = bldg.polygon.to_outline(Distance::meters(0.1)) {
+                if let Ok(p) = bldg.polygon.to_outline(Distance::meters(1.0)) {
                     outlines_batch.push(cs.building_outline, p);
                 }
 
